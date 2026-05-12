@@ -169,31 +169,19 @@ async def run_pipeline(domain: str, no_deploy: bool, offer: str, cta: str, notes
         site_dir = await loop.run_in_executor(None, generate_site, intel, prospect_id, notes)
         yield sse("log", text="Site generated", level="success")
 
-        # ── Step 4: Deploy ───────────────────────────────────────────
-        # TEMP: GitHub Pages deploy disabled — no GITHUB_TOKEN available right now.
-        # When the key is added back, restore the original block below.
-        preview_url = None
+        # ── Step 4: Deploy to Supabase Storage ──────────────────────
         index_path = os.path.join(site_dir, "index.html")
-        # Auto-open the generated site in the default browser for instant local preview.
-        try:
-            import webbrowser
-            webbrowser.open(f"file://{os.path.abspath(index_path)}")
-            yield sse("log", text=f"Opened in browser: {index_path}", level="success")
-        except Exception as e:
-            yield sse("log", text=f"Could not auto-open: {e}", level="dim")
-        preview_url = f"file://{os.path.abspath(index_path)}"
-
-        # --- Original deploy block (re-enable when GITHUB_TOKEN is available) ---
-        # if not no_deploy:
-        #     yield sse("log", text="Deploying to GitHub Pages...", level="info")
-        #     try:
-        #         preview_url = await loop.run_in_executor(None, deploy_site, prospect_id, site_dir)
-        #         yield sse("log", text=f"Live at {preview_url}", level="success")
-        #     except Exception as e:
-        #         yield sse("log", text=f"Deploy failed: {e} — continuing", level="error")
-        #         preview_url = None
-        # else:
-        #     preview_url = f"[local] {site_dir}/index.html"
+        preview_url = None
+        if not no_deploy:
+            yield sse("log", text="Uploading to Supabase Storage...", level="info")
+            try:
+                preview_url = await loop.run_in_executor(None, deploy_site, prospect_id, site_dir)
+                yield sse("log", text=f"Live at {preview_url}", level="success")
+            except Exception as e:
+                yield sse("log", text=f"Deploy failed: {e} — continuing", level="error")
+                preview_url = None
+        else:
+            preview_url = f"[local] {index_path}"
 
         # ── Step 5: Generate email ───────────────────────────────────
         yield sse("log", text="Writing outreach messaging...", level="info")

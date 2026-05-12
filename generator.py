@@ -537,7 +537,7 @@ def _build_testimonials(intel: dict) -> str:
     n_reviews = len(real_reviews)
     grid_max_width = {1: 480, 2: 820, 3: 1200}.get(n_reviews, 1200)
 
-    return f'''<section style="background:#f8f9fb;padding:96px 24px;overflow:hidden;">
+    return f'''<section data-lvrg-section="testimonials" style="background:#f8f9fb;padding:96px 24px;overflow:hidden;display:block;clear:both;position:relative;float:none;">
   <div style="max-width:1200px;margin:0 auto;">
     <div style="text-align:center;margin-bottom:56px;">
       <p style="color:{accent};font-weight:600;font-size:13px;letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;">Loved by locals</p>
@@ -707,6 +707,108 @@ def _repair_html_structure(html: str) -> str:
         return html
     head_html, body_html, html_attrs = parsed
     return f"<!DOCTYPE html>\n<html{html_attrs}>\n<head>{head_html}</head>\n<body>{body_html}</body>\n</html>"
+
+
+def _fix_section_nesting(html: str) -> str:
+    """Verify data-lvrg-section elements are direct <body> children and fix if not.
+
+    html5lib closes unclosed tags but cannot reorder the tree when a section gets
+    swallowed inside a Claude-generated flex/grid container. This pass detects
+    misplaced sections and moves them to body level (before <footer> if present).
+    """
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, 'html5lib')
+        body = soup.body
+        if body is None:
+            return html
+
+        misplaced = [el for el in soup.find_all(attrs={'data-lvrg-section': True})
+                     if el.parent != body]
+        if not misplaced:
+            return html
+
+        footer = body.find('footer')
+        for el in misplaced:
+            el.extract()
+            if footer:
+                footer.insert_before(el)
+            else:
+                body.append(el)
+
+        names = [el.get('data-lvrg-section') for el in misplaced]
+        print(f"  [layout] Fixed {len(misplaced)} misplaced section(s): {names}")
+
+        head_html = ''.join(str(c) for c in soup.head.contents) if soup.head else ''
+        body_html = ''.join(str(c) for c in body.contents)
+        html_attrs = ''
+        if soup.html and soup.html.attrs:
+            html_attrs = ''.join(f' {k}="{v}"' for k, v in soup.html.attrs.items())
+        return f"<!DOCTYPE html>\n<html{html_attrs}>\n<head>{head_html}</head>\n<body>{body_html}</body>\n</html>"
+    except Exception:
+        return html
+
+
+def _claude_qa_pass(html: str, intel: dict) -> str:
+    """Claude Haiku QA pass: detects truncated content and completes it.
+
+    Runs after all structural fixes so the only remaining issue is content-level
+    truncation from Pass 1 hitting max_tokens mid-sentence. Haiku is used for
+    speed and cost — it only fixes truncated text, nothing else.
+    """
+    print(f"  [qa] Verifying generated content...")
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, 'html5lib')
+        if not soup.body:
+            return html
+        body_html = str(soup.body)
+    except Exception:
+        return html
+
+    business_name = intel.get('business_name', 'the business')
+    services = intel.get('services') or []
+    services_context = ', '.join(str(s) for s in services[:6]) if services else 'various services'
+
+    prompt = f"""Final QA check on a generated HTML preview site for {business_name} (services: {services_context}).
+
+Find and fix ONLY truncated content — text that ends abruptly mid-sentence. Common signs:
+- Ends with a preposition: "for", "with", "and", "the", "a", "an", "of", "to", "in", "on"
+- Ends with "featuring", "including", "offering", "providing", "experience"
+- Heading or paragraph clearly unfinished
+
+For each truncated piece: complete the sentence naturally in 5-15 words using the business context. Do NOT change design, colors, structure, or any other text.
+
+HTML body:
+{body_html}
+
+Return ONLY the fixed <body> element with opening and closing tags. If nothing is truncated, return it unchanged. No explanation, no markdown fences."""
+
+    try:
+        client = _get_client()
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=16000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        fixed = _strip_fences(resp.content[0].text.strip())
+
+        from bs4 import BeautifulSoup as _BS
+        fixed_soup = _BS(fixed, 'html5lib')
+        if not fixed_soup.body:
+            return html
+        fixed_body_html = ''.join(str(c) for c in fixed_soup.body.contents)
+
+        orig_soup = _BS(html, 'html5lib')
+        head_html = ''.join(str(c) for c in orig_soup.head.contents) if orig_soup.head else ''
+        html_attrs = ''
+        if orig_soup.html and orig_soup.html.attrs:
+            html_attrs = ''.join(f' {k}="{v}"' for k, v in orig_soup.html.attrs.items())
+        print(f"  [qa] ✓ Content verification complete")
+        return f"<!DOCTYPE html>\n<html{html_attrs}>\n<head>{head_html}</head>\n<body>{fixed_body_html}</body>\n</html>"
+    except Exception as e:
+        print(f"  [qa] QA pass skipped: {e}")
+        return html
 
 
 def _normalize_part1_for_stitching(part1_html: str) -> str:
@@ -907,7 +1009,7 @@ def generate_site(intel: dict, prospect_id: str, notes: str = "") -> str:
     print(f"  [generator] Pass 1/2 — above fold...")
     resp1 = client.messages.create(
         model="claude-opus-4-7",
-        max_tokens=6000,
+        max_tokens=8000,
         messages=[{"role": "user", "content": _build_part1_prompt(intel, notes_block, hero_bg_instruction, image_rule, design_spec)}]
     )
     part1 = _strip_fences(resp1.content[0].text)
@@ -954,6 +1056,15 @@ def generate_site(intel: dict, prospect_id: str, notes: str = "") -> str:
     # subsequent footer + widget injection lands at the body level — not inside an
     # accidentally-still-open services card or testimonials grid.
     repaired = _repair_html_structure(stitched)
+
+    # Verify LVRG-injected sections are direct body children. html5lib closes
+    # unclosed tags but won't reorder the tree — this pass fixes any section that
+    # got swallowed inside a Claude flex/grid container (causes visible overlap).
+    repaired = _fix_section_nesting(repaired)
+
+    # Claude Haiku QA pass: detects and completes any text truncated when Pass 1
+    # hit max_tokens mid-sentence (e.g. service card ending "experience for").
+    repaired = _claude_qa_pass(repaired, intel)
 
     # Inject the design tokens <style> block into <head>. This is what makes the
     # palette/fonts/radius/shadow consistent regardless of Claude drift.

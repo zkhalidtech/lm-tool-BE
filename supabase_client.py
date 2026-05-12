@@ -117,6 +117,24 @@ def update_engine_queue_result(domain: str, preview_url: str, email_data: dict):
     return result
 
 
+def upload_to_storage(prospect_id: str, html_bytes: bytes) -> None:
+    """Upload generated site HTML to Supabase Storage (bucket: sites, public)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY — cannot upload to storage")
+
+    url = f"{SUPABASE_URL}/storage/v1/object/sites/{prospect_id}/index.html"
+    req = urllib.request.Request(url, data=html_bytes, method="POST")
+    req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
+    req.add_header("Content-Type", "text/html; charset=utf-8")
+    req.add_header("x-upsert", "true")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+            print(f"  [storage] ✓ Uploaded: sites/{prospect_id}/index.html")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Storage upload failed {e.code}: {e.read().decode()}")
+
+
 def update_lead_status(domain: str, status: str, extra: dict = None):
     """Update a lead's status by domain."""
     body = {"status": status}

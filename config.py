@@ -16,10 +16,10 @@ SENDER_WEBSITE = "lvrg.com"
 SENDER_PHONE = "619.361.7484"
 BOOKING_URL = "https://theresandiego.com/advertise/"
 
-# GitHub Pages base URL for deployed previews
-GITHUB_USER = "joshclifford"
-GITHUB_REPO = "lvrg-previews"
-PREVIEW_BASE_URL = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}"
+# Vercel app URL — set APP_URL env var in Railway + local .env
+# Preview links are served at {APP_URL}/p/{prospect_id}
+APP_URL = os.environ.get("APP_URL", "https://your-app.vercel.app").rstrip("/")
+PREVIEW_BASE_URL = f"{APP_URL}/p"
 
 # Output dirs
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
